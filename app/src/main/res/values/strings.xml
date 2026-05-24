@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Rasel Blocker</string>
+    <string name="accessibility_service_label">Rasel Blocker Service</string>
+    <string name="accessibility_description">Rasel Blocker uses Accessibility Service to detect and block selected apps.</string>
+</resources>
