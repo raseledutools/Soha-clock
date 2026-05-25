@@ -14,6 +14,25 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        // ── NDK C++ engine ──────────────────────────────────────
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17 -O3"
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    // ── CMake for C++ packet engine ─────────────────────────────
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

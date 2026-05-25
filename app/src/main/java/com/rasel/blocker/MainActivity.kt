@@ -66,9 +66,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.rasel.blocker.adblock.AdBlockVpnService
+import com.rasel.blocker.adblock.FilterManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.rasel.blocker.adblock.AdBlockVpnService
+import com.rasel.blocker.adblock.FilterManager
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
@@ -232,6 +236,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ── Ad Blocker VPN helpers ──────────────────────────────────────
+    private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) startAdBlockVpn()
+    }
+    private fun requestVpnAndStart() {
+        val intent = android.net.VpnService.prepare(this)
+        if (intent != null) vpnLauncher.launch(intent) else startAdBlockVpn()
+    }
+    private fun startAdBlockVpn() {
+        val i = Intent(this, AdBlockVpnService::class.java).apply { action = AdBlockVpnService.ACTION_START }
+        androidx.core.content.ContextCompat.startForegroundService(this, i)
+    }
+    private fun stopAdBlockVpn() {
+        startService(Intent(this, AdBlockVpnService::class.java).apply { action = AdBlockVpnService.ACTION_STOP })
+    }
+    // ────────────────────────────────────────────────────────────────
+
     private var webViewRef: WebView? = null
     private val selectPdfLauncher = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty() && webViewRef != null) {
@@ -274,6 +295,11 @@ class MainActivity : ComponentActivity() {
                 var showWebTools by remember { mutableStateOf(false) }
                 var activeAiUrl by remember { mutableStateOf<String?>(null) }
                 var activeAiTitle by remember { mutableStateOf("") }
+                // ── Ad Blocker state ──
+                var adBlockRunning by remember { mutableStateOf(AdBlockVpnService.isRunning) }
+                var youtubeBlock  by remember { mutableStateOf(true) }
+                var websiteBlock  by remember { mutableStateOf(true) }
+                var appAdsBlock   by remember { mutableStateOf(true) }
 
                 Column(modifier = Modifier.fillMaxSize()) {
                     CustomStatusBar()
@@ -296,7 +322,24 @@ class MainActivity : ComponentActivity() {
                         onStopService = { stopService(Intent(this@MainActivity, FakeLockService::class.java)) },
                         onUpdateSettings = { opacity, size, autoLockSeconds, enFloat, enVol, autoHide ->
                             saveAndBroadcast(prefs, autoLockSeconds, opacity, size, enFloat, enVol, autoHide)
-                        }
+                        },
+                        // ── Ad Blocker callbacks ──
+                        adBlockRunning = adBlockRunning,
+                        youtubeBlock   = youtubeBlock,
+                        websiteBlock   = websiteBlock,
+                        appAdsBlock    = appAdsBlock,
+                        onToggleAdBlock = {
+                            if (adBlockRunning) {
+                                stopAdBlockVpn()
+                                adBlockRunning = false
+                            } else {
+                                requestVpnAndStart()
+                                adBlockRunning = true
+                            }
+                        },
+                        onYoutubeToggle = { v -> youtubeBlock = v; FilterManager.enableYoutubeFilter(v) },
+                        onWebsiteToggle = { v -> websiteBlock = v; FilterManager.enableWebsiteFilter(v) },
+                        onAppAdsToggle  = { v -> appAdsBlock  = v; FilterManager.enableAppAdsFilter(v) }
                     )
                 }
 
@@ -484,7 +527,16 @@ fun SettingsScreen(
     prefs: SharedPreferences, context: Context,
     onOpenWebTools: () -> Unit, onOpenAi: (String, String) -> Unit,
     onStartService: (Int, Float, Int, Boolean, Boolean, Boolean) -> Unit, onStopService: () -> Unit,
-    onUpdateSettings: (Float, Int, Int, Boolean, Boolean, Boolean) -> Unit
+    onUpdateSettings: (Float, Int, Int, Boolean, Boolean, Boolean) -> Unit,
+    // ── Ad Blocker params ──
+    adBlockRunning: Boolean = false,
+    youtubeBlock: Boolean = true,
+    websiteBlock: Boolean = true,
+    appAdsBlock: Boolean = true,
+    onToggleAdBlock: () -> Unit = {},
+    onYoutubeToggle: (Boolean) -> Unit = {},
+    onWebsiteToggle: (Boolean) -> Unit = {},
+    onAppAdsToggle:  (Boolean) -> Unit = {}
 ) {
     var isRunning by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
@@ -557,6 +609,118 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(10.dp))
+
+        // ══════════════════════════════════════════════
+        // 🛡️ AD BLOCKER SECTION
+        // ══════════════════════════════════════════════
+        Text(
+            "🛡️ Ad Blocker",
+            fontSize = 18.sp, fontWeight = FontWeight.Bold,
+            color = ComposeColor.White,
+            modifier = Modifier.align(Alignment.Start)
+        )
+
+        // Main ON/OFF Button
+        Button(
+            onClick = onToggleAdBlock,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (adBlockRunning) ComposeColor(0xFFDC2626) else ComposeColor(0xFF16A34A)
+            )
+        ) {
+            Icon(
+                if (adBlockRunning) Icons.Filled.GppBad else Icons.Filled.GppGood,
+                contentDescription = null, tint = ComposeColor.White, modifier = Modifier.size(22.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                if (adBlockRunning) "⏹  Ad Blocker বন্ধ করুন" else "▶  Ad Blocker চালু করুন",
+                fontSize = 16.sp, fontWeight = FontWeight.Bold, color = ComposeColor.White
+            )
+        }
+
+        // Status chip
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (adBlockRunning) ComposeColor(0xFF14532D) else ComposeColor(0xFF1C1917)
+            ),
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (adBlockRunning) "✅ সুরক্ষিত — Ads Block হচ্ছে" else "⚠️ সুরক্ষিত নয়",
+                    color = if (adBlockRunning) ComposeColor(0xFF4ADE80) else ComposeColor(0xFFFFA500),
+                    fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "Blocked: ${FilterManager.blockedCount}",
+                    color = ComposeColor(0xFF94A3B8), fontSize = 12.sp
+                )
+            }
+        }
+
+        // Toggle cards
+        AdBlockToggleCard(
+            emoji = "📺", title = "YouTube Ads",
+            subtitle = "YouTube App ও Website এর বিজ্ঞাপন বন্ধ",
+            checked = youtubeBlock, onChecked = onYoutubeToggle
+        )
+        AdBlockToggleCard(
+            emoji = "🌐", title = "Website Ads",
+            subtitle = "সব ওয়েবসাইটের Ad ও Tracker বন্ধ",
+            checked = websiteBlock, onChecked = onWebsiteToggle
+        )
+        AdBlockToggleCard(
+            emoji = "📱", title = "App Ads (All Apps)",
+            subtitle = "AdMob, Unity, AppLovin, Facebook Ads বন্ধ",
+            checked = appAdsBlock, onChecked = onAppAdsToggle
+        )
+
+        Text(
+            "ℹ️ Local VPN ব্যবহার করে DNS filter করা হয়। কোনো data device ছেড়ে যায় না।",
+            color = ComposeColor(0xFF64748B), fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(Modifier.height(20.dp))
+    }
+}
+
+// ── Ad Blocker Toggle Card ─────────────────────────────────────
+@Composable
+fun AdBlockToggleCard(
+    emoji: String, title: String, subtitle: String,
+    checked: Boolean, onChecked: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1E293B)),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(emoji, fontSize = 22.sp)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, color = ComposeColor.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, color = ComposeColor(0xFF94A3B8), fontSize = 11.sp)
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onChecked,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = ComposeColor.White,
+                    checkedTrackColor = ComposeColor(0xFF16A34A)
+                )
+            )
+        }
     }
 }
 
