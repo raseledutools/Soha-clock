@@ -1,5 +1,6 @@
 package com.rasel.blocker
 
+import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,7 +20,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -47,7 +50,20 @@ class MainActivity : ComponentActivity() {
         const val KEY_OPACITY = "btn_opacity"
         const val KEY_SIZE = "btn_size"
         const val KEY_AUTO_SECONDS = "auto_seconds"
-        const val ACTION_UPDATE_BUTTON = "com.rasel.blocker.UPDATE_BUTTON"
+        const val KEY_ENABLE_FLOAT = "enable_float"
+        const val KEY_ENABLE_VOLUME = "enable_volume"
+        const val KEY_AUTO_HIDE = "auto_hide"
+        const val ACTION_UPDATE_SETTINGS = "com.rasel.blocker.UPDATE_SETTINGS"
+
+        fun hasUsageStatsPermission(context: Context): Boolean {
+            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), context.packageName)
+            } else {
+                appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), context.packageName)
+            }
+            return mode == AppOpsManager.MODE_ALLOWED
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,18 +84,11 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 SettingsScreen(
                     prefs = prefs,
-                    onStartService = { autoLockSeconds, opacity, size ->
-                        prefs.edit()
-                            .putInt(KEY_AUTO_SECONDS, autoLockSeconds)
-                            .putFloat(KEY_OPACITY, opacity)
-                            .putInt(KEY_SIZE, size)
-                            .apply()
+                    context = this,
+                    onStartService = { autoLockSeconds, opacity, size, enFloat, enVol, autoHide ->
+                        saveAndBroadcast(prefs, autoLockSeconds, opacity, size, enFloat, enVol, autoHide)
                         if (Settings.canDrawOverlays(this)) {
-                            val intent = Intent(this, FakeLockService::class.java).apply {
-                                putExtra("auto_lock_seconds", autoLockSeconds)
-                                putExtra("btn_opacity", opacity)
-                                putExtra("btn_size", size)
-                            }
+                            val intent = Intent(this, FakeLockService::class.java)
                             startForegroundService(intent)
                         } else {
                             startActivity(
@@ -93,31 +102,36 @@ class MainActivity : ComponentActivity() {
                     onStopService = {
                         stopService(Intent(this, FakeLockService::class.java))
                     },
-                    onUpdateButton = { opacity, size ->
-                        prefs.edit()
-                            .putFloat(KEY_OPACITY, opacity)
-                            .putInt(KEY_SIZE, size)
-                            .apply()
-                        val intent = Intent(ACTION_UPDATE_BUTTON).apply {
-                            putExtra("btn_opacity", opacity)
-                            putExtra("btn_size", size)
-                        }
-                        sendBroadcast(intent)
+                    onUpdateSettings = { opacity, size, autoLockSeconds, enFloat, enVol, autoHide ->
+                        saveAndBroadcast(prefs, autoLockSeconds, opacity, size, enFloat, enVol, autoHide)
                     }
                 )
             }
         }
     }
 
+    private fun saveAndBroadcast(
+        prefs: SharedPreferences, autoLockSeconds: Int, opacity: Float, size: Int,
+        enFloat: Boolean, enVol: Boolean, autoHide: Boolean
+    ) {
+        prefs.edit()
+            .putInt(KEY_AUTO_SECONDS, autoLockSeconds)
+            .putFloat(KEY_OPACITY, opacity)
+            .putInt(KEY_SIZE, size)
+            .putBoolean(KEY_ENABLE_FLOAT, enFloat)
+            .putBoolean(KEY_ENABLE_VOLUME, enVol)
+            .putBoolean(KEY_AUTO_HIDE, autoHide)
+            .apply()
+
+        val intent = Intent(ACTION_UPDATE_SETTINGS)
+        sendBroadcast(intent)
+    }
+
     override fun onResume() {
         super.onResume()
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (Settings.canDrawOverlays(this)) {
-            val intent = Intent(this, FakeLockService::class.java).apply {
-                putExtra("auto_lock_seconds", prefs.getInt(KEY_AUTO_SECONDS, 30))
-                putExtra("btn_opacity", prefs.getFloat(KEY_OPACITY, 0.7f))
-                putExtra("btn_size", prefs.getInt(KEY_SIZE, 110))
-            }
+            val intent = Intent(this, FakeLockService::class.java)
             startForegroundService(intent)
         }
     }
@@ -129,16 +143,21 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SettingsScreen(
     prefs: SharedPreferences,
-    onStartService: (Int, Float, Int) -> Unit,
+    context: Context,
+    onStartService: (Int, Float, Int, Boolean, Boolean, Boolean) -> Unit,
     onStopService: () -> Unit,
-    onUpdateButton: (Float, Int) -> Unit
+    onUpdateSettings: (Float, Int, Int, Boolean, Boolean, Boolean) -> Unit
 ) {
     var isRunning by remember { mutableStateOf(false) }
-    var selectedSeconds by remember { mutableStateOf(prefs.getInt(MainActivity.KEY_AUTO_SECONDS, 30)) }
+    var selectedSeconds by remember { mutableStateOf(prefs.getInt(MainActivity.KEY_AUTO_SECONDS, 0)) }
     var opacity by remember { mutableStateOf(prefs.getFloat(MainActivity.KEY_OPACITY, 0.7f)) }
     var btnSize by remember { mutableStateOf(prefs.getInt(MainActivity.KEY_SIZE, 110)) }
+    
+    var enableFloat by remember { mutableStateOf(prefs.getBoolean(MainActivity.KEY_ENABLE_FLOAT, true)) }
+    var enableVolume by remember { mutableStateOf(prefs.getBoolean(MainActivity.KEY_ENABLE_VOLUME, true)) }
+    var autoHide by remember { mutableStateOf(prefs.getBoolean(MainActivity.KEY_AUTO_HIDE, false)) }
 
-    val autoLockOptions = listOf(15, 20, 30, 60, 120)
+    val autoLockOptions = listOf(0, 15, 30, 60, 120) // 0 means Off
 
     Column(
         modifier = Modifier
@@ -148,58 +167,85 @@ fun SettingsScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         Text("🔒 FakeLock", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = ComposeColor.White)
-        Text("Floating button দিয়ে নকল lock screen", fontSize = 13.sp, color = ComposeColor(0xFF888888))
+        Text("Smart Lock Screen Utility", fontSize = 13.sp, color = ComposeColor(0xFF888888))
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        // Opacity Slider
+        // Smart Settings Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1A1A1A))
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("🔘 Button Opacity", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
-                    Text("${(opacity * 100).toInt()}%", fontSize = 14.sp, color = ComposeColor(0xFF9C27B0), fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("⚙️ Smart Settings", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Volume Button Lock/Unlock", fontSize = 13.sp, color = ComposeColor.White)
+                    Switch(checked = enableVolume, onCheckedChange = { 
+                        enableVolume = it
+                        onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide)
+                    })
                 }
-                Slider(
-                    value = opacity,
-                    onValueChange = { opacity = it; onUpdateButton(opacity, btnSize) },
-                    valueRange = 0.1f..1.0f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = ComposeColor(0xFF9C27B0),
-                        activeTrackColor = ComposeColor(0xFF9C27B0),
-                        inactiveTrackColor = ComposeColor(0xFF333333)
-                    )
-                )
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Floating Button দেখাও", fontSize = 13.sp, color = ComposeColor.White)
+                    Switch(checked = enableFloat, onCheckedChange = { 
+                        enableFloat = it
+                        onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide)
+                    })
+                }
+
+                if (enableFloat) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column {
+                            Text("Auto-Hide Button", fontSize = 13.sp, color = ComposeColor.White)
+                            Text("শুধু Home Screen এ দেখাবে", fontSize = 10.sp, color = ComposeColor.Gray)
+                        }
+                        Switch(checked = autoHide, onCheckedChange = { 
+                            if (it && !MainActivity.hasUsageStatsPermission(context)) {
+                                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                            } else {
+                                autoHide = it
+                                onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide)
+                            }
+                        })
+                    }
+                }
             }
         }
 
-        // Size Slider
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1A1A1A))
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("📐 Button Size", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
-                    Text("${btnSize}px", fontSize = 14.sp, color = ComposeColor(0xFF6200EE), fontWeight = FontWeight.Bold)
-                }
-                Slider(
-                    value = btnSize.toFloat(),
-                    onValueChange = { btnSize = it.toInt(); onUpdateButton(opacity, btnSize) },
-                    valueRange = 60f..180f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = ComposeColor(0xFF6200EE),
-                        activeTrackColor = ComposeColor(0xFF6200EE),
-                        inactiveTrackColor = ComposeColor(0xFF333333)
+        // Sliders Card
+        if (enableFloat) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1A1A1A))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("🔘 Button Opacity", fontSize = 13.sp, color = ComposeColor.White)
+                        Text("${(opacity * 100).toInt()}%", fontSize = 13.sp, color = ComposeColor(0xFF9C27B0))
+                    }
+                    Slider(
+                        value = opacity,
+                        onValueChange = { opacity = it; onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide) },
+                        valueRange = 0.1f..1.0f
                     )
-                )
+                    
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("📐 Button Size", fontSize = 13.sp, color = ComposeColor.White)
+                        Text("${btnSize}px", fontSize = 13.sp, color = ComposeColor(0xFF6200EE))
+                    }
+                    Slider(
+                        value = btnSize.toFloat(),
+                        onValueChange = { btnSize = it.toInt(); onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide) },
+                        valueRange = 60f..180f
+                    )
+                }
             }
         }
 
@@ -210,14 +256,17 @@ fun SettingsScreen(
             colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1A1A1A))
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("⏱ Auto Lock সময়", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
+                Text("⏱ Auto Lock সময় (Off রাখাই ভালো)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     autoLockOptions.forEach { sec ->
-                        val label = if (sec >= 60) "${sec / 60}m" else "${sec}s"
+                        val label = if (sec == 0) "Off" else if (sec >= 60) "${sec / 60}m" else "${sec}s"
                         val selected = selectedSeconds == sec
                         Button(
-                            onClick = { selectedSeconds = sec },
+                            onClick = { 
+                                selectedSeconds = sec
+                                onUpdateSettings(opacity, btnSize, selectedSeconds, enableFloat, enableVolume, autoHide) 
+                            },
                             shape = RoundedCornerShape(10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (selected) ComposeColor(0xFF6200EE) else ComposeColor(0xFF2A2A2A)
@@ -231,27 +280,17 @@ fun SettingsScreen(
             }
         }
 
-        // How to use
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = ComposeColor(0xFF1A1A1A))
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("📖 কিভাবে কাজ করে", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ComposeColor.White)
-                Text("• Screen এ ছোট 🔒 floating button ভাসবে", fontSize = 12.sp, color = ComposeColor(0xFFBBBBBB))
-                Text("• Button চাপলে → পুরো কালো screen + ঘড়ি", fontSize = 12.sp, color = ComposeColor(0xFFBBBBBB))
-                Text("• ঘড়িতে Double Tap → আবার normal হবে", fontSize = 12.sp, color = ComposeColor(0xFFBBBBBB))
-                Text("• ${selectedSeconds}s পরে Auto Lock হবে", fontSize = 12.sp, color = ComposeColor(0xFF9C27B0))
-            }
-        }
-
         Spacer(modifier = Modifier.weight(1f))
 
         Button(
             onClick = {
-                if (!isRunning) { onStartService(selectedSeconds, opacity, btnSize); isRunning = true }
-                else { onStopService(); isRunning = false }
+                if (!isRunning) { 
+                    onStartService(selectedSeconds, opacity, btnSize, enableFloat, enableVolume, autoHide)
+                    isRunning = true 
+                } else { 
+                    onStopService()
+                    isRunning = false 
+                }
             },
             modifier = Modifier.fillMaxWidth().height(54.dp),
             shape = RoundedCornerShape(14.dp),
@@ -279,26 +318,64 @@ class FakeLockService : Service() {
     private var floatingButtonParams: WindowManager.LayoutParams? = null
     private var lockScreenView: android.widget.FrameLayout? = null
     private val handler = Handler(Looper.getMainLooper())
-    private var autoLockSeconds = 30
-    private var lastInteractionTime = System.currentTimeMillis()
-    private var isLocked = false
+    
+    // Preferences Variables
+    private var autoLockSeconds = 0
     private var btnOpacity = 0.7f
     private var btnSize = 110
+    private var enableFloat = true
+    private var enableVolume = true
+    private var autoHide = false
+
+    private var isLocked = false
+    private var lastInteractionTime = System.currentTimeMillis()
+    private var lastVolumeToggleTime = 0L
+    private var launcherPackage = ""
 
     private val updateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == MainActivity.ACTION_UPDATE_BUTTON) {
-                btnOpacity = intent.getFloatExtra("btn_opacity", btnOpacity)
-                btnSize = intent.getIntExtra("btn_size", btnSize)
-                updateFloatingButton()
+            if (intent?.action == MainActivity.ACTION_UPDATE_SETTINGS) {
+                loadSettings()
+                applySettings()
             }
         }
     }
 
-    private val autoLockRunnable = object : Runnable {
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!enableVolume) return // Smart logic: ignore if disabled
+            
+            if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
+                val now = System.currentTimeMillis()
+                if (now - lastVolumeToggleTime > 500) { 
+                    lastVolumeToggleTime = now
+                    if (isLocked) hideLockScreen() else showLockScreen()
+                }
+            }
+        }
+    }
+
+    // Unified Runnable for Auto-Lock and Auto-Hide Logic
+    private val backgroundTaskRunnable = object : Runnable {
         override fun run() {
-            val elapsed = (System.currentTimeMillis() - lastInteractionTime) / 1000
-            if (!isLocked && elapsed >= autoLockSeconds) showLockScreen()
+            // Auto Lock Logic
+            if (autoLockSeconds > 0 && !isLocked) {
+                val elapsed = (System.currentTimeMillis() - lastInteractionTime) / 1000
+                if (elapsed >= autoLockSeconds) showLockScreen()
+            }
+
+            // Auto Hide Floating Button Logic (UsageStats)
+            if (enableFloat && autoHide && !isLocked) {
+                if (MainActivity.hasUsageStatsPermission(this@FakeLockService)) {
+                    val fgApp = getForegroundApp(this@FakeLockService)
+                    if (fgApp == launcherPackage) {
+                        floatingButtonView?.visibility = View.VISIBLE
+                    } else {
+                        floatingButtonView?.visibility = View.GONE
+                    }
+                }
+            }
+
             handler.postDelayed(this, 1000)
         }
     }
@@ -312,23 +389,15 @@ class FakeLockService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.let {
-            autoLockSeconds = it.getIntExtra("auto_lock_seconds", 30)
-            btnOpacity = it.getFloatExtra("btn_opacity", 0.7f)
-            btnSize = it.getIntExtra("btn_size", 110)
-        }
-        if (floatingButtonView != null) updateFloatingButton()
-        return START_STICKY
-    }
-
     override fun onCreate() {
         super.onCreate()
         startForegroundNotification()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        launcherPackage = getLauncherPackageName(this)
 
-        val filter = IntentFilter(MainActivity.ACTION_UPDATE_BUTTON)
-        // API 33+ এ flag দরকার, নিচে নেই
+        loadSettings()
+
+        val filter = IntentFilter(MainActivity.ACTION_UPDATE_SETTINGS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(updateReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
@@ -336,8 +405,54 @@ class FakeLockService : Service() {
             registerReceiver(updateReceiver, filter)
         }
 
+        val volumeFilter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+        registerReceiver(volumeReceiver, volumeFilter)
+
         showFloatingButton()
-        handler.post(autoLockRunnable)
+        applySettings()
+        handler.post(backgroundTaskRunnable)
+    }
+
+    private fun loadSettings() {
+        val prefs = getSharedPreferences(MainActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        autoLockSeconds = prefs.getInt(MainActivity.KEY_AUTO_SECONDS, 0)
+        btnOpacity = prefs.getFloat(MainActivity.KEY_OPACITY, 0.7f)
+        btnSize = prefs.getInt(MainActivity.KEY_SIZE, 110)
+        enableFloat = prefs.getBoolean(MainActivity.KEY_ENABLE_FLOAT, true)
+        enableVolume = prefs.getBoolean(MainActivity.KEY_ENABLE_VOLUME, true)
+        autoHide = prefs.getBoolean(MainActivity.KEY_AUTO_HIDE, false)
+    }
+
+    private fun applySettings() {
+        if (!enableFloat) {
+            floatingButtonView?.visibility = View.GONE
+        } else if (!isLocked) {
+            if (!autoHide) floatingButtonView?.visibility = View.VISIBLE
+            updateFloatingButton()
+        }
+    }
+
+    private fun getLauncherPackageName(context: Context): String {
+        val intent = Intent(Intent.ACTION_MAIN)
+        intent.addCategory(Intent.CATEGORY_HOME)
+        val resolveInfo = context.packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        return resolveInfo?.activityInfo?.packageName ?: ""
+    }
+
+    private fun getForegroundApp(context: Context): String? {
+        val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
+        val time = System.currentTimeMillis()
+        val stats = usageStatsManager.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, time - 1000 * 10, time)
+        if (stats != null) {
+            var latest: android.app.usage.UsageStats? = null
+            for (usageStats in stats) {
+                if (latest == null || usageStats.lastTimeUsed > latest.lastTimeUsed) {
+                    latest = usageStats
+                }
+            }
+            return latest?.packageName
+        }
+        return null
     }
 
     private fun startForegroundNotification() {
@@ -346,7 +461,7 @@ class FakeLockService : Service() {
         (getSystemService(NotificationManager::class.java)).createNotificationChannel(channel)
         val notif = Notification.Builder(this, channelId)
             .setContentTitle("FakeLock চালু আছে")
-            .setContentText("Floating 🔒 button screen এ আছে")
+            .setContentText("স্মার্ট লক ব্যাকগ্রাউন্ডে কাজ করছে")
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .build()
         startForeground(1, notif)
@@ -354,17 +469,12 @@ class FakeLockService : Service() {
 
     private fun showFloatingButton() {
         val ctx = this
-        val alphaInt = (btnOpacity * 255).toInt()
-
         floatingButtonView = android.widget.FrameLayout(ctx).apply {
             val btn = android.widget.TextView(ctx).apply {
                 text = "🔒"
-                textSize = btnSize * 0.18f
                 gravity = Gravity.CENTER
-                alpha = btnOpacity
                 background = android.graphics.drawable.GradientDrawable().apply {
                     shape = android.graphics.drawable.GradientDrawable.OVAL
-                    setColor(Color.argb(alphaInt, 20, 20, 20))
                 }
                 setPadding(16, 16, 16, 16)
             }
@@ -381,12 +491,13 @@ class FakeLockService : Service() {
             x = 30; y = 200
         }
 
-        floatingButtonView!!.setOnTouchListener(object : android.view.View.OnTouchListener {
+        floatingButtonView!!.setOnTouchListener(object : View.OnTouchListener {
             var startX = 0f; var startY = 0f
             var startRawX = 0f; var startRawY = 0f
             var isDragging = false
 
-            override fun onTouch(v: android.view.View, event: MotionEvent): Boolean {
+            override fun onTouch(v: View, event: MotionEvent): Boolean {
+                lastInteractionTime = System.currentTimeMillis() // Reset interaction
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         startRawX = event.rawX; startRawY = event.rawY
@@ -406,7 +517,6 @@ class FakeLockService : Service() {
                     }
                     MotionEvent.ACTION_UP -> {
                         if (!isDragging) {
-                            lastInteractionTime = System.currentTimeMillis()
                             showLockScreen()
                         }
                     }
@@ -422,6 +532,7 @@ class FakeLockService : Service() {
         val frame = floatingButtonView ?: return
         val btn = frame.getChildAt(0) as? android.widget.TextView ?: return
         val alphaInt = (btnOpacity * 255).toInt()
+        
         btn.alpha = btnOpacity
         btn.textSize = btnSize * 0.18f
         (btn.background as? android.graphics.drawable.GradientDrawable)
@@ -445,11 +556,24 @@ class FakeLockService : Service() {
     private fun showLockScreen() {
         if (isLocked) return
         isLocked = true
-        floatingButtonView?.visibility = android.view.View.GONE
+        floatingButtonView?.visibility = View.GONE
 
         val ctx = this
-        lockScreenView = android.widget.FrameLayout(ctx).apply {
+        lockScreenView = object : android.widget.FrameLayout(ctx) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                        return true
+                    }
+                }
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
             setBackgroundColor(Color.BLACK)
+            
+            systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
 
             val center = android.widget.LinearLayout(ctx).apply {
                 orientation = android.widget.LinearLayout.VERTICAL
@@ -505,10 +629,12 @@ class FakeLockService : Service() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or 
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.OPAQUE
-        )
+        ).apply {
+            screenBrightness = 0.0f
+        }
 
         windowManager.addView(lockScreenView, params)
         handler.post(clockRunnable)
@@ -519,8 +645,9 @@ class FakeLockService : Service() {
         handler.removeCallbacks(clockRunnable)
         lockScreenView?.let { windowManager.removeView(it) }
         lockScreenView = null
-        floatingButtonView?.visibility = android.view.View.VISIBLE
+        
         lastInteractionTime = System.currentTimeMillis()
+        applySettings() // Show floating button again based on settings
     }
 
     private fun updateClock() {
@@ -537,7 +664,8 @@ class FakeLockService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
-        try { unregisterReceiver(updateReceiver) } catch (e: Exception) { /* already unregistered */ }
+        try { unregisterReceiver(updateReceiver) } catch (e: Exception) {}
+        try { unregisterReceiver(volumeReceiver) } catch (e: Exception) {}
         floatingButtonView?.let { try { windowManager.removeView(it) } catch (e: Exception) {} }
         lockScreenView?.let { try { windowManager.removeView(it) } catch (e: Exception) {} }
     }
