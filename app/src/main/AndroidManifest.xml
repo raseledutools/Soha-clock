@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.BATTERY_STATS"/>
 
     <!-- Auto-Hide (UsageStats) ফিচারের জন্য প্রয়োজনীয় নতুন পারমিশন -->
     <uses-permission 
