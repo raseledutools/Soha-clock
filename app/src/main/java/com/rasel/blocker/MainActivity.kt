@@ -12,6 +12,9 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.media.VolumeProvider
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -319,6 +322,9 @@ class FakeLockService : Service() {
     private var lockScreenView: android.widget.FrameLayout? = null
     private val handler = Handler(Looper.getMainLooper())
     
+    // MediaSession for perfect volume button interception
+    private var mediaSession: MediaSession? = null
+
     // Preferences Variables
     private var autoLockSeconds = 0
     private var btnOpacity = 0.7f
@@ -337,34 +343,18 @@ class FakeLockService : Service() {
             if (intent?.action == MainActivity.ACTION_UPDATE_SETTINGS) {
                 loadSettings()
                 applySettings()
+                setupVolumeInterception() // Re-check volume setting
             }
         }
     }
 
-    private val volumeReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (!enableVolume) return // Smart logic: ignore if disabled
-            
-            if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
-                val now = System.currentTimeMillis()
-                if (now - lastVolumeToggleTime > 500) { 
-                    lastVolumeToggleTime = now
-                    if (isLocked) hideLockScreen() else showLockScreen()
-                }
-            }
-        }
-    }
-
-    // Unified Runnable for Auto-Lock and Auto-Hide Logic
     private val backgroundTaskRunnable = object : Runnable {
         override fun run() {
-            // Auto Lock Logic
             if (autoLockSeconds > 0 && !isLocked) {
                 val elapsed = (System.currentTimeMillis() - lastInteractionTime) / 1000
                 if (elapsed >= autoLockSeconds) showLockScreen()
             }
 
-            // Auto Hide Floating Button Logic (UsageStats)
             if (enableFloat && autoHide && !isLocked) {
                 if (MainActivity.hasUsageStatsPermission(this@FakeLockService)) {
                     val fgApp = getForegroundApp(this@FakeLockService)
@@ -375,7 +365,6 @@ class FakeLockService : Service() {
                     }
                 }
             }
-
             handler.postDelayed(this, 1000)
         }
     }
@@ -405,12 +394,44 @@ class FakeLockService : Service() {
             registerReceiver(updateReceiver, filter)
         }
 
-        val volumeFilter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
-        registerReceiver(volumeReceiver, volumeFilter)
-
+        setupVolumeInterception()
         showFloatingButton()
         applySettings()
         handler.post(backgroundTaskRunnable)
+    }
+
+    // ─────────────────────────────────────────────
+    // VOLUME BUTTON HACK (Guaranteed to work everywhere)
+    // ─────────────────────────────────────────────
+    private fun setupVolumeInterception() {
+        if (!enableVolume) {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+            mediaSession = null
+            return
+        }
+
+        if (mediaSession == null) {
+            mediaSession = MediaSession(this, "FakeLockVolumeHack")
+            val playbackState = PlaybackState.Builder()
+                .setState(PlaybackState.STATE_PLAYING, 0, 1f)
+                .build()
+            mediaSession?.setPlaybackState(playbackState)
+            
+            // Catch all volume changes globally
+            mediaSession?.setPlaybackToRemote(object : VolumeProvider(VolumeProvider.VOLUME_CONTROL_RELATIVE, 100, 50) {
+                override fun onAdjustVolume(direction: Int) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastVolumeToggleTime > 500) { 
+                        lastVolumeToggleTime = now
+                        Handler(Looper.getMainLooper()).post {
+                            if (isLocked) hideLockScreen() else showLockScreen()
+                        }
+                    }
+                }
+            })
+        }
+        mediaSession?.isActive = true
     }
 
     private fun loadSettings() {
@@ -497,7 +518,7 @@ class FakeLockService : Service() {
             var isDragging = false
 
             override fun onTouch(v: View, event: MotionEvent): Boolean {
-                lastInteractionTime = System.currentTimeMillis() // Reset interaction
+                lastInteractionTime = System.currentTimeMillis()
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         startRawX = event.rawX; startRawY = event.rawY
@@ -546,12 +567,19 @@ class FakeLockService : Service() {
         btn.layoutParams.height = btnSize
 
         try { windowManager.updateViewLayout(floatingButtonView, floatingButtonParams) }
-        catch (e: Exception) { /* view not attached yet */ }
+        catch (e: Exception) { }
     }
 
     private var clockTextView: android.widget.TextView? = null
     private var dateTextView: android.widget.TextView? = null
     private var lastTapTime = 0L
+
+    private val aggressiveUiFlags = (View.SYSTEM_UI_FLAG_FULLSCREEN
+            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
 
     private fun showLockScreen() {
         if (isLocked) return
@@ -561,19 +589,26 @@ class FakeLockService : Service() {
         val ctx = this
         lockScreenView = object : android.widget.FrameLayout(ctx) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-                if (event.action == KeyEvent.ACTION_DOWN) {
-                    if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                        return true
-                    }
+                if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_BACK) {
+                    return true // Block Back Button
                 }
                 return super.dispatchKeyEvent(event)
             }
+            
+            // Block all touches going behind and consume them
+            override fun onTouchEvent(event: MotionEvent?): Boolean {
+                return true
+            }
         }.apply {
             setBackgroundColor(Color.BLACK)
+            systemUiVisibility = aggressiveUiFlags
             
-            systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+            // Force re-hide if status bar is pulled
+            setOnSystemUiVisibilityChangeListener { visibility ->
+                if ((visibility and View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                    handler.postDelayed({ systemUiVisibility = aggressiveUiFlags }, 100)
+                }
+            }
 
             val center = android.widget.LinearLayout(ctx).apply {
                 orientation = android.widget.LinearLayout.VERTICAL
@@ -582,7 +617,8 @@ class FakeLockService : Service() {
                 clockTextView = android.widget.TextView(ctx).apply {
                     text = getCurrentTime()
                     textSize = 80f
-                    setTextColor(Color.WHITE)
+                    // Opacity reduced (70 out of 255) for dimmer text
+                    setTextColor(Color.argb(70, 255, 255, 255))
                     typeface = android.graphics.Typeface.create("sans-serif-light", android.graphics.Typeface.BOLD)
                     gravity = Gravity.CENTER
                 }
@@ -590,7 +626,7 @@ class FakeLockService : Service() {
                 dateTextView = android.widget.TextView(ctx).apply {
                     text = getCurrentDate()
                     textSize = 16f
-                    setTextColor(Color.argb(160, 255, 255, 255))
+                    setTextColor(Color.argb(50, 255, 255, 255)) // Dimmer date
                     gravity = Gravity.CENTER
                     setPadding(0, 6, 0, 0)
                 }
@@ -598,7 +634,7 @@ class FakeLockService : Service() {
                 val hint = android.widget.TextView(ctx).apply {
                     text = "double tap to unlock"
                     textSize = 11f
-                    setTextColor(Color.argb(60, 255, 255, 255))
+                    setTextColor(Color.argb(40, 255, 255, 255)) // Dimmer hint
                     gravity = Gravity.CENTER
                     setPadding(0, 48, 0, 0)
                 }
@@ -625,15 +661,18 @@ class FakeLockService : Service() {
             }
         }
 
+        // WindowManager Flags for 0 Brightness & Blocking Status Bar
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or 
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN or 
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.OPAQUE
         ).apply {
-            screenBrightness = 0.0f
+            // Android often ignores 0.0f, so using 0.01f forces hardware dimming
+            screenBrightness = 0.01f 
         }
 
         windowManager.addView(lockScreenView, params)
@@ -647,7 +686,7 @@ class FakeLockService : Service() {
         lockScreenView = null
         
         lastInteractionTime = System.currentTimeMillis()
-        applySettings() // Show floating button again based on settings
+        applySettings() 
     }
 
     private fun updateClock() {
@@ -663,9 +702,11 @@ class FakeLockService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         handler.removeCallbacksAndMessages(null)
         try { unregisterReceiver(updateReceiver) } catch (e: Exception) {}
-        try { unregisterReceiver(volumeReceiver) } catch (e: Exception) {}
         floatingButtonView?.let { try { windowManager.removeView(it) } catch (e: Exception) {} }
         lockScreenView?.let { try { windowManager.removeView(it) } catch (e: Exception) {} }
     }
