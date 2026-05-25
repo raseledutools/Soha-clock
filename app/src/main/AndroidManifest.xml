@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.BATTERY_STATS"/>
 
+    <!-- ইন্টারনেট পারমিশন (AI চ্যাট এবং WebView এর জন্য) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Auto-Hide (UsageStats) ফিচারের জন্য প্রয়োজনীয় নতুন পারমিশন -->
     <uses-permission 
         android:name="android.permission.PACKAGE_USAGE_STATS" 
@@ -40,6 +43,16 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="keeps screen overlay active for fake lock display" />
+        </service>
+
+        <!-- নতুন Floating AI Service -->
+        <service
+            android:name=".FloatingAiService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="keeps screen overlay active for floating AI chat" />
         </service>
 
         <receiver
