@@ -595,8 +595,14 @@ class FakeLockService : Service() {
                 return super.dispatchKeyEvent(event)
             }
             
-            // Block all touches going behind and consume them
+            // Block all touches and handle double tap to unlock
             override fun onTouchEvent(event: MotionEvent?): Boolean {
+                if (event?.action == MotionEvent.ACTION_UP) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastTapTime < 400) hideLockScreen()
+                    lastTapTime = now
+                    lastInteractionTime = System.currentTimeMillis()
+                }
                 return true
             }
         }.apply {
@@ -653,12 +659,6 @@ class FakeLockService : Service() {
                 )
             )
 
-            setOnClickListener {
-                val now = System.currentTimeMillis()
-                if (now - lastTapTime < 400) hideLockScreen()
-                lastTapTime = now
-                lastInteractionTime = System.currentTimeMillis()
-            }
         }
 
         // WindowManager Flags for 0 Brightness & Blocking Status Bar
@@ -666,13 +666,13 @@ class FakeLockService : Service() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or 
-            WindowManager.LayoutParams.FLAG_FULLSCREEN or 
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_FULLSCREEN or
+            WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.OPAQUE
         ).apply {
-            // Android often ignores 0.0f, so using 0.01f forces hardware dimming
-            screenBrightness = 0.01f 
+            screenBrightness = 0.0f
+            dimAmount = 1.0f
         }
 
         windowManager.addView(lockScreenView, params)
