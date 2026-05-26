@@ -5,32 +5,28 @@ import android.content.Intent
 import android.security.KeyChain
 import android.util.Base64
 import android.util.Log
-import java.io.ByteArrayOutputStream
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.BasicConstraints
+import org.bouncycastle.asn1.x509.Extension
+import org.bouncycastle.asn1.x509.KeyUsage
+import org.bouncycastle.cert.X509v3CertificateBuilder
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import java.io.ByteArrayInputStream
 import java.math.BigInteger
 import java.security.*
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.*
-import javax.security.auth.x500.X500Principal
 
 /**
- * CaManager
- * ─────────────────────────────────────────────────────────────────
- * Custom CA Certificate তৈরি করে এবং device এ install করে।
+ * CaManager — Bouncy Castle দিয়ে CA cert তৈরি
  *
- * এই CA দিয়ে আমরা HTTPS traffic মাঝখানে "decrypt" করতে পারব
- * (Man-in-the-Middle on our own device, for ad blocking only).
- *
- * কাজের ধাপ:
- *  1. EC key pair generate করা (RSA এর চেয়ে দ্রুত)
- *  2. Self-signed CA certificate তৈরি করা
- *  3. User কে system trust store এ install করতে বলা
- *  4. VPN service এ এই cert দিয়ে HTTPS decrypt করা
- *
- * ⚠️ Root ছাড়া User CA হিসেবে install হবে —
- *    এতে সব app এ কাজ না-ও করতে পারে (network_security_config ব্যবহার করা apps)
- * ─────────────────────────────────────────────────────────────────
+ * পুরনো sun.security.x509 reflection বাদ দিয়ে
+ * Bouncy Castle ব্যবহার করা হয়েছে।
+ * সব Android version এ কাজ করবে।
  */
 object CaManager {
 
@@ -38,27 +34,27 @@ object CaManager {
     private const val PREFS = "adblock_ca_prefs"
     private const val KEY_CA_CERT_PEM = "ca_cert_pem"
     private const val KEY_CA_KEY_PEM  = "ca_key_pem"
-    private const val CA_ALIAS = "RaselAdBlockCA"
+    const val CA_ALIAS = "RaselAdBlockCA"
 
-    // ── Generate a new EC CA key pair + self-signed cert ────────────
+    // ── Generate EC key pair + self-signed CA cert (Bouncy Castle) ──
     fun generateCa(context: Context): Boolean {
         return try {
-            // 1. Generate EC key pair (P-256)
+            // 1. EC key pair (P-256 — দ্রুত এবং secure)
             val keyGen = KeyPairGenerator.getInstance("EC")
             keyGen.initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
-            val keyPair = keyGen.generateKeyPair()
+            val kp = keyGen.generateKeyPair()
 
-            // 2. Build self-signed X.509 certificate
-            val cert = buildSelfSignedCert(keyPair)
+            // 2. Bouncy Castle দিয়ে proper X.509 CA cert build
+            val cert = buildCaWithBouncyCastle(kp)
 
-            // 3. Save PEM to SharedPreferences
+            // 3. SharedPrefs এ save করা
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             prefs.edit()
                 .putString(KEY_CA_CERT_PEM, toPem(cert.encoded, "CERTIFICATE"))
-                .putString(KEY_CA_KEY_PEM,  toPem(keyPair.private.encoded, "PRIVATE KEY"))
+                .putString(KEY_CA_KEY_PEM,  toPem(kp.private.encoded, "PRIVATE KEY"))
                 .apply()
 
-            Log.i(TAG, "CA generated successfully: ${cert.subjectDN}")
+            Log.i(TAG, "✅ CA generated: ${cert.subjectDN}")
             true
         } catch (e: Exception) {
             Log.e(TAG, "CA generation failed", e)
@@ -67,121 +63,158 @@ object CaManager {
     }
 
     /**
-     * Build a minimal self-signed X.509 v3 CA certificate.
+     * Bouncy Castle দিয়ে CA certificate তৈরি।
      *
-     * আমরা এখানে Java এর standard library ব্যবহার করছি।
-     * Production এ Bouncy Castle ব্যবহার করলে আরও complete হবে।
+     * পুরনো sun.security reflection বাদ — এটা সব Android এ কাজ করে।
+     * CA flag set আছে (BasicConstraints = true) তাই sub-cert sign করতে পারবে।
      */
-    private fun buildSelfSignedCert(keyPair: KeyPair): X509Certificate {
-        // Use Android's internal sun.security.x509 via reflection
-        // (এটা সব Android version এ কাজ করে)
-        val certClass   = Class.forName("sun.security.x509.X509CertImpl")
-        val infoClass   = Class.forName("sun.security.x509.X509CertInfo")
-        val intervalClass = Class.forName("sun.security.x509.CertificateValidity")
-        val bigIntClass   = Class.forName("sun.security.x509.CertificateSerialNumber")
-        val algIdClass    = Class.forName("sun.security.x509.AlgorithmId")
-        val nameClass     = Class.forName("sun.security.x509.X500Name")
-
+    private fun buildCaWithBouncyCastle(kp: KeyPair): X509Certificate {
         val now     = Date()
-        val notAfter = Date(now.time + 10L * 365 * 24 * 60 * 60 * 1000) // 10 years
-        val validity = intervalClass.getConstructor(Date::class.java, Date::class.java)
-            .newInstance(now, notAfter)
-        val serial   = bigIntClass.getConstructor(Int::class.java, Random::class.java)
-            .newInstance(64, Random())
-        val owner    = nameClass.getConstructor(String::class.java)
-            .newInstance("CN=Rasel AdBlock CA, O=RaselBlocker, C=BD")
-        val algId    = algIdClass.getMethod("get", String::class.java)
-            .invoke(null, "SHA256withECDSA")
+        val notAfter = Date(now.time + 10L * 365 * 24 * 60 * 60 * 1000) // 10 বছর
 
-        val info = infoClass.newInstance()
-        val SET = { field: String, value: Any ->
-            infoClass.getMethod("set", String::class.java, Any::class.java)
-                .invoke(info, field, value)
-        }
-        SET("version",  Class.forName("sun.security.x509.CertificateVersion").getConstructor(Int::class.java).newInstance(2))
-        SET("serialNumber", serial)
-        SET("algorithmID", Class.forName("sun.security.x509.CertificateAlgorithmId").getConstructor(algIdClass).newInstance(algId))
-        SET("subject",  Class.forName("sun.security.x509.CertificateSubjectName").getConstructor(nameClass).newInstance(owner))
-        SET("issuer",   Class.forName("sun.security.x509.CertificateIssuerName").getConstructor(nameClass).newInstance(owner))
-        SET("validity", Class.forName("sun.security.x509.CertificateValidity").cast(validity))
-        SET("key",      Class.forName("sun.security.x509.CertificateX509Key").getConstructor(PublicKey::class.java).newInstance(keyPair.public))
+        val subject = X500Name("CN=Rasel AdBlock CA, O=RaselBlocker, C=BD")
 
-        val cert = certClass.getConstructor(infoClass).newInstance(info)
-        certClass.getMethod("sign", PrivateKey::class.java, String::class.java)
-            .invoke(cert, keyPair.private, "SHA256withECDSA")
+        val builder: X509v3CertificateBuilder = JcaX509v3CertificateBuilder(
+            subject,                            // issuer (self-signed)
+            BigInteger.valueOf(SecureRandom().nextLong().and(Long.MAX_VALUE)),
+            now,
+            notAfter,
+            subject,                            // subject
+            kp.public
+        )
 
-        return cert as X509Certificate
+        // CA:TRUE — এটা CA certificate
+        builder.addExtension(
+            Extension.basicConstraints, true,
+            BasicConstraints(true)
+        )
+
+        // Key Usage: keyCertSign + cRLSign
+        builder.addExtension(
+            Extension.keyUsage, true,
+            KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign)
+        )
+
+        val signer = JcaContentSignerBuilder("SHA256withECDSA")
+            .build(kp.private)
+
+        return JcaX509CertificateConverter()
+            .getCertificate(builder.build(signer))
     }
 
-    // ── Get saved cert PEM ───────────────────────────────────────────
-    fun getCaCertPem(context: Context): String? {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_CA_CERT_PEM, null)
-    }
+    // ── Saved cert / key access ──────────────────────────────────────
+    fun getCaCertPem(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CA_CERT_PEM, null)
 
-    fun getCaKeyPem(context: Context): String? {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_CA_KEY_PEM, null)
-    }
+    fun getCaKeyPem(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CA_KEY_PEM, null)
 
     fun hasCa(context: Context): Boolean = getCaCertPem(context) != null
 
-    // ── Get X509Certificate object from saved PEM ────────────────────
     fun getCaCert(context: Context): X509Certificate? {
         val pem = getCaCertPem(context) ?: return null
         return try {
-            val der = Base64.decode(
-                pem.replace("-----BEGIN CERTIFICATE-----", "")
-                   .replace("-----END CERTIFICATE-----", "")
-                   .replace("\\s".toRegex(), ""),
-                Base64.DEFAULT
-            )
+            val der = pemToDer(pem, "CERTIFICATE")
             CertificateFactory.getInstance("X.509")
-                .generateCertificate(der.inputStream()) as X509Certificate
+                .generateCertificate(ByteArrayInputStream(der)) as X509Certificate
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse CA cert", e)
             null
         }
     }
 
+    fun getCaPrivateKey(context: Context): PrivateKey? {
+        val pem = getCaKeyPem(context) ?: return null
+        return try {
+            val der = pemToDer(pem, "PRIVATE KEY")
+            // EC key
+            java.security.KeyFactory.getInstance("EC")
+                .generatePrivate(java.security.spec.PKCS8EncodedKeySpec(der))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse CA private key", e)
+            null
+        }
+    }
+
     /**
-     * User কে CA certificate install করার জন্য system dialog খোলা।
-     *
-     * Android এ User CA install হলে:
-     *  - Browser এ HTTPS ads block হবে
-     *  - Network Security Config ব্যবহার না করা apps এ কাজ করবে
-     *
-     * Root ছাড়া System CA হিসেবে install করা যায় না।
+     * Per-domain fake certificate বানানো (CA দিয়ে sign করা)।
+     * HttpsInterceptor এটা ব্যবহার করবে।
      */
+    fun signFakeCert(
+        context: Context,
+        targetHost: String,
+        realCert: X509Certificate?
+    ): X509Certificate? {
+        val caCert  = getCaCert(context)   ?: return null
+        val caKey   = getCaPrivateKey(context) ?: return null
+
+        return try {
+            val kpg = KeyPairGenerator.getInstance("EC")
+            kpg.initialize(ECGenParameterSpec("secp256r1"))
+            val kp = kpg.generateKeyPair()
+
+            val subject = try {
+                X500Name(realCert?.subjectDN?.name ?: "CN=$targetHost")
+            } catch (_: Exception) {
+                X500Name("CN=$targetHost")
+            }
+            val issuer = X500Name(caCert.subjectDN.name)
+            val now    = Date()
+            val expiry = Date(now.time + 365L * 24 * 3600 * 1000)
+
+            val builder = JcaX509v3CertificateBuilder(
+                issuer,
+                BigInteger.valueOf(SecureRandom().nextLong().and(Long.MAX_VALUE)),
+                now, expiry,
+                subject,
+                kp.public
+            )
+
+            // SAN — Subject Alternative Name
+            val sanExt = org.bouncycastle.asn1.x509.GeneralNamesBuilder()
+                .addName(
+                    org.bouncycastle.asn1.x509.GeneralName(
+                        org.bouncycastle.asn1.x509.GeneralName.dNSName,
+                        targetHost
+                    )
+                ).build()
+            builder.addExtension(Extension.subjectAlternativeName, false, sanExt)
+
+            val signer = JcaContentSignerBuilder("SHA256withECDSA").build(caKey)
+            JcaX509CertificateConverter().getCertificate(builder.build(signer))
+        } catch (e: Exception) {
+            Log.e(TAG, "signFakeCert failed for $targetHost", e)
+            null
+        }
+    }
+
+    // ── User কে CA install করতে dialog দেখানো ────────────────────────
     fun promptInstallCa(context: Context): Intent? {
         val pem = getCaCertPem(context) ?: return null
-        val der = Base64.decode(
-            pem.replace("-----BEGIN CERTIFICATE-----", "")
-               .replace("-----END CERTIFICATE-----", "")
-               .replace("\\s".toRegex(), ""),
-            Base64.DEFAULT
-        )
+        val der = pemToDer(pem, "CERTIFICATE")
         return KeyChain.createInstallIntent().apply {
             putExtra(KeyChain.EXTRA_CERTIFICATE, der)
             putExtra(KeyChain.EXTRA_NAME, CA_ALIAS)
         }
     }
 
-    // ── DER → PEM conversion ─────────────────────────────────────────
+    fun getCaDerBytes(context: Context): ByteArray? {
+        val pem = getCaCertPem(context) ?: return null
+        return try { pemToDer(pem, "CERTIFICATE") } catch (_: Exception) { null }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
     private fun toPem(der: ByteArray, type: String): String {
-        val b64 = Base64.encodeToString(der, Base64.NO_WRAP)
+        val b64     = Base64.encodeToString(der, Base64.NO_WRAP)
         val wrapped = b64.chunked(64).joinToString("\n")
         return "-----BEGIN $type-----\n$wrapped\n-----END $type-----\n"
     }
 
-    // ── Export CA cert as DER bytes (for asset embedding) ───────────
-    fun getCaDerBytes(context: Context): ByteArray? {
-        val pem = getCaCertPem(context) ?: return null
-        return Base64.decode(
-            pem.replace("-----BEGIN CERTIFICATE-----", "")
-               .replace("-----END CERTIFICATE-----", "")
-               .replace("\\s".toRegex(), ""),
-            Base64.DEFAULT
-        )
+    private fun pemToDer(pem: String, type: String): ByteArray {
+        val clean = pem
+            .replace("-----BEGIN $type-----", "")
+            .replace("-----END $type-----", "")
+            .replace("\\s".toRegex(), "")
+        return Base64.decode(clean, Base64.DEFAULT)
     }
 }

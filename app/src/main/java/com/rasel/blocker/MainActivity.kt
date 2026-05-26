@@ -71,8 +71,6 @@ import com.rasel.blocker.adblock.FilterManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.rasel.blocker.adblock.AdBlockVpnService
-import com.rasel.blocker.adblock.FilterManager
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
@@ -891,12 +889,4 @@ class FloatingAiService : Service() {
     }
 }
 
-// ─────────────────────────────────────────────
-// FakeLock Overlay Service (Unchanged Core Logic)
-// ─────────────────────────────────────────────
-class FakeLockService : Service() {
-    private lateinit var windowManager: WindowManager
-    private var lockScreenView: android.widget.FrameLayout? = null
-    // ... [Rest of your lock service code remains the same, omitted here for brevity to keep focus on AI]
-    override fun onBind(intent: Intent?): IBinder? = null
-}
+// FakeLockService is in FakeLockService.kt

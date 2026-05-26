@@ -126,7 +126,7 @@ class AdBlockVpnService : VpnService() {
 
         when (protocol) {
             17 -> handleUdp(raw, len, ihl, out)   // UDP (DNS)
-            6  -> handleTcp(raw, len, ihl)          // TCP (HTTPS SNI)
+            6  -> handleTcp(raw, len, ihl, out)          // TCP (HTTPS SNI)
         }
     }
 
@@ -158,7 +158,7 @@ class AdBlockVpnService : VpnService() {
     // ─────────────────────────────────────────────────────────────
     // TCP — TLS SNI extraction (C++ engine, no CA cert needed)
     // ─────────────────────────────────────────────────────────────
-    private fun handleTcp(raw: ByteArray, len: Int, ihl: Int) {
+    private fun handleTcp(raw: ByteArray, len: Int, ihl: Int, out: FileOutputStream) {
         val tcpOffset = ihl
         if (len <= tcpOffset + 20) return
         val dstPort   = ((raw[tcpOffset + 2].toInt() and 0xFF) shl 8) or
@@ -177,9 +177,12 @@ class AdBlockVpnService : VpnService() {
             Log.d(TAG, "SNI → $sni")
             if (NativeEngine.shouldBlock(sni)) {
                 FilterManager.incrementBlocked()
-                Log.d(TAG, "BLOCKED HTTPS SNI: $sni")
-                // Connection টা drop করতে TCP RST পাঠানো উচিত
-                // (simplified: just log — full RST inject needs raw socket)
+                Log.d(TAG, "BLOCKED HTTPS SNI (RST): $sni")
+                // ── TCP RST inject — connection forcefully close করা ──
+                val rst = TcpRstInjector.buildRstPacket(raw, ihl)
+                if (rst != null) {
+                    try { out.write(rst) } catch (_: Exception) {}
+                }
             }
         }
     }

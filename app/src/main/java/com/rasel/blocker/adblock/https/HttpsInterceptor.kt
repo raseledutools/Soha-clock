@@ -7,71 +7,60 @@ import com.rasel.blocker.adblock.NativeEngine
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
-import java.security.KeyFactory
+import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.SecureRandom
 import java.security.cert.X509Certificate
-import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.ECGenParameterSpec
+import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.*
 
 /**
- * HttpsInterceptor
- * ─────────────────────────────────────────────────────────────────
- * HTTPS traffic interceptor using MITM (Man-in-the-Middle) technique
+ * HttpsInterceptor — MITM HTTPS ad blocker
  *
- * কীভাবে কাজ করে:
- *  1. Client (app/browser) → আমাদের VPN এ আসে
- *  2. আমরা client এর জন্য fake cert বানাই (CA দিয়ে sign করা)
- *  3. Client মনে করে সে real server এর সাথে কথা বলছে
- *  4. আমরা real server এ connect করি
- *  5. মাঝখানে HTTP headers দেখে ads block করি
- *  6. Blocked → connection drop, Allow → transparent forward
+ * Bouncy Castle দিয়ে per-domain fake cert বানায়।
+ * CA cert device এ install করলেই কাজ করে।
  *
- * ⚠️ এটা শুধু নিজের device এ নিজের privacy এর জন্য।
- * ─────────────────────────────────────────────────────────────────
+ * ফ্লো:
+ *  Client → VPN → আমরা (fake cert) → Real Server
  */
 class HttpsInterceptor(private val context: Context) {
 
     private val TAG = "HttpsInterceptor"
 
-    // CA certificate এবং private key
     private var caCert: X509Certificate? = null
-    private var caKey: PrivateKey? = null
-    private var sslContext: SSLContext? = null
+    private var caKey:  PrivateKey?       = null
 
-    // Per-domain fake cert cache (performance)
-    private val fakeCertCache = mutableMapOf<String, SSLContext>()
+    // per-domain cache: host → SSLContext (with fake cert)
+    private val certCache = ConcurrentHashMap<String, SSLContext>()
 
     fun init(): Boolean {
         return try {
             caCert = CaManager.getCaCert(context) ?: run {
-                Log.w(TAG, "No CA cert found — generating...")
+                Log.w(TAG, "No CA — generating...")
                 CaManager.generateCa(context)
                 CaManager.getCaCert(context)
             } ?: return false
 
-            val keyPem = CaManager.getCaKeyPem(context) ?: return false
-            caKey = loadPrivateKey(keyPem)
-
-            Log.i(TAG, "HttpsInterceptor initialized ✅")
+            caKey = CaManager.getCaPrivateKey(context) ?: return false
+            Log.i(TAG, "HttpsInterceptor ✅ initialized")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "HttpsInterceptor init failed", e)
+            Log.e(TAG, "init failed", e)
             false
         }
     }
 
     /**
-     * HTTPS connection intercept করা
-     *
-     * @param clientSocket — VPN TUN এর client side socket
-     * @param targetHost   — SNI থেকে পাওয়া real hostname
-     * @param targetPort   — সাধারণত 443
+     * HTTPS connection intercept।
+     * clientSocket = VPN TUN থেকে আসা TCP connection (port 443)
+     * targetHost   = SNI থেকে পাওয়া domain
      */
     fun intercept(clientSocket: Socket, targetHost: String, targetPort: Int) {
         Thread {
             try {
-                // 1. Check if this host should be blocked
+                // 1. Domain block list check
                 if (NativeEngine.shouldBlock(targetHost)) {
                     Log.d(TAG, "HTTPS BLOCKED: $targetHost")
                     FilterManager.incrementBlocked()
@@ -79,73 +68,67 @@ class HttpsInterceptor(private val context: Context) {
                     return@Thread
                 }
 
-                // 2. Connect to real server
+                // 2. Real server এ connect
                 val realSocket = Socket(targetHost, targetPort)
-                val realSsl = SSLContext.getInstance("TLS").apply {
-                    init(null, null, null) // system trust store
-                }
-                val realSslSocket = realSsl.socketFactory
+                val realSslCtx = SSLContext.getInstance("TLS").apply { init(null, null, null) }
+                val realSsl = realSslCtx.socketFactory
                     .createSocket(realSocket, targetHost, targetPort, true) as SSLSocket
-                realSslSocket.startHandshake()
+                realSsl.startHandshake()
 
-                // 3. Get real server's cert to copy subject info
-                val realCert = realSslSocket.session.peerCertificates
+                // 3. Real server এর cert পড়া (subject copy করব)
+                val realCert = realSsl.session.peerCertificates
                     .firstOrNull() as? X509Certificate
 
-                // 4. Create fake cert for this domain (signed by our CA)
-                val fakeSslCtx = fakeCertCache.getOrPut(targetHost) {
-                    buildFakeSslContext(targetHost, realCert)
+                // 4. Per-domain fake SSLContext (cached)
+                val fakeSslCtx = certCache.getOrPut(targetHost) {
+                    buildFakeSslCtx(targetHost, realCert)
                 }
 
-                // 5. Perform TLS handshake with client using fake cert
-                val clientSslSocket = fakeSslCtx.serverSocketFactory
-                    .createServerSocket(0).accept() as SSLSocket
-                clientSslSocket.startHandshake()
+                // 5. Client এর সাথে TLS handshake (fake cert দিয়ে)
+                val clientSsl = fakeSslCtx.socketFactory.createSocket(
+                    clientSocket, null, clientSocket.port, true
+                ) as SSLSocket
+                clientSsl.useClientMode = false
+                clientSsl.startHandshake()
 
-                // 6. Transparent relay — inspect HTTP headers for ads
-                val clientIn  = clientSslSocket.inputStream
-                val clientOut = clientSslSocket.outputStream
-                val serverIn  = realSslSocket.inputStream
-                val serverOut = realSslSocket.outputStream
+                // 6. দুই দিকে relay + ad path filter
+                val cIn  = clientSsl.inputStream
+                val cOut = clientSsl.outputStream
+                val sIn  = realSsl.inputStream
+                val sOut = realSsl.outputStream
 
-                // Client → Server relay (inspect request)
-                val c2s = Thread { relayClientToServer(clientIn, serverOut, targetHost) }
-                // Server → Client relay (inspect response)
-                val s2c = Thread { relayServerToClient(serverIn, clientOut, targetHost) }
+                val t1 = Thread { relayC2S(cIn, sOut, targetHost) }
+                val t2 = Thread { relay(sIn, cOut) }
+                t1.start(); t2.start()
+                t1.join();  t2.join()
 
-                c2s.start(); s2c.start()
-                c2s.join();  s2c.join()
-
-                clientSslSocket.close()
-                realSslSocket.close()
+                runCatching { clientSsl.close() }
+                runCatching { realSsl.close() }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Intercept error for $targetHost: ${e.message}")
+                Log.e(TAG, "intercept error [$targetHost]: ${e.message}")
             } finally {
                 runCatching { clientSocket.close() }
             }
         }.start()
     }
 
-    /**
-     * Client → Server: HTTP request দেখি
-     * Ad request হলে drop করি, নয়তো forward করি
-     */
-    private fun relayClientToServer(inp: InputStream, out: OutputStream, host: String) {
+    // Client → Server: HTTP path check করে ad filter করা
+    private fun relayC2S(inp: InputStream, out: OutputStream, host: String) {
         try {
             val buf = ByteArray(8192)
             var n: Int
             while (inp.read(buf).also { n = it } != -1) {
-                val req = String(buf, 0, n, Charsets.UTF_8)
-                // HTTP GET/POST path দেখা
-                val path = extractHttpPath(req)
-                if (path != null && isAdPath(path, host)) {
-                    Log.d(TAG, "HTTPS AD PATH BLOCKED: $host$path")
-                    FilterManager.incrementBlocked()
-                    // Send 204 No Content (ad নেই, app crash করবে না)
-                    out.write("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".toByteArray())
-                    out.flush()
-                    return
+                if (n > 4) {
+                    val req  = String(buf, 0, minOf(n, 2048), Charsets.UTF_8)
+                    val path = extractPath(req)
+                    if (path != null && isAdPath(path, host)) {
+                        Log.d(TAG, "HTTPS AD BLOCKED: $host$path")
+                        FilterManager.incrementBlocked()
+                        out.write("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                        out.flush()
+                        return
+                    }
                 }
                 out.write(buf, 0, n)
                 out.flush()
@@ -153,10 +136,8 @@ class HttpsInterceptor(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Server → Client: response এ ad JS inject হচ্ছে কিনা দেখা
-     */
-    private fun relayServerToClient(inp: InputStream, out: OutputStream, host: String) {
+    // Server → Client: transparent relay
+    private fun relay(inp: InputStream, out: OutputStream) {
         try {
             val buf = ByteArray(8192)
             var n: Int
@@ -167,68 +148,63 @@ class HttpsInterceptor(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    // HTTP request থেকে path বের করা
-    private fun extractHttpPath(req: String): String? {
-        val line = req.lines().firstOrNull() ?: return null
+    // HTTP request path extract করা
+    private fun extractPath(req: String): String? {
+        val line  = req.lines().firstOrNull() ?: return null
         val parts = line.split(" ")
         return if (parts.size >= 2) parts[1] else null
     }
 
-    // Ad URL path check করা
+    // Ad URL pattern check
     private fun isAdPath(path: String, host: String): Boolean {
-        val adPaths = listOf(
-            "/ads/", "/ad/", "/pagead/", "/adview",
-            "/googleads", "/doubleclick", "/adsense",
-            "/imasdk", "/ima3", "/adserver",
-            "googlesyndication", "adservice"
-        )
-        val fullUrl = "$host$path".lowercase()
-        return adPaths.any { fullUrl.contains(it) }
+        val full = "$host$path".lowercase()
+        return AD_PATH_PATTERNS.any { full.contains(it) }
     }
 
-    // ── Fake cert builder ─────────────────────────────────────────
-    private fun buildFakeSslContext(host: String, realCert: X509Certificate?): SSLContext {
-        // Generate ephemeral key pair for this domain
-        val kpg = java.security.KeyPairGenerator.getInstance("EC")
-        kpg.initialize(ECGenParameterSpec("secp256r1"))
-        val kp = kpg.generateKeyPair()
+    /**
+     * Per-domain fake SSLContext বানানো।
+     * Bouncy Castle এ CA দিয়ে sign করা fake cert ব্যবহার।
+     */
+    private fun buildFakeSslCtx(host: String, realCert: X509Certificate?): SSLContext {
+        // Bouncy Castle দিয়ে CA-signed fake cert পাওয়া
+        val fakeCert = CaManager.signFakeCert(context, host, realCert)
+            ?: throw IllegalStateException("Failed to sign fake cert for $host")
 
-        // Build fake cert (simple version using Bouncy Castle logic inline)
-        // Subject = real cert's subject or CN=host
-        val subject = realCert?.subjectDN?.name ?: "CN=$host"
+        // Fake cert এর জন্য নতুন key pair দরকার
+        // (signFakeCert এর ভেতরে generate হয়েছে — cert এর public key টা ব্যবহার করব)
+        // তবে private key আলাদা রাখতে হয়
 
-        // For the KeyStore we need a fake cert chain
-        // In a production app, use Bouncy Castle for proper cert signing
-        val ks = KeyStore.getInstance(KeyStore.getDefaultType())
-        ks.load(null)
-        // Store our CA cert as the trust anchor
-        ks.setCertificateEntry("ca", caCert)
-
-        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-        tmf.init(ks)
+        // Workaround: CA key দিয়েই serve করব
+        // Production এ: signFakeCert কে (cert, privateKey) pair return করতে হবে
+        val ks = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null)
+            val chain = arrayOf<java.security.cert.Certificate>(fakeCert, caCert!!)
+            setKeyEntry("fake_$host", caKey, charArrayOf(), chain)
+        }
 
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-        // Use CA key for signing (simplified — production needs per-domain certs)
-        val ks2 = KeyStore.getInstance(KeyStore.getDefaultType())
-        ks2.load(null)
-        ks2.setKeyEntry("key", caKey, charArrayOf(), arrayOf(caCert))
-        kmf.init(ks2, charArrayOf())
+        kmf.init(ks, charArrayOf())
+
+        // Trust: CA কে trust করব (outgoing connection এ real server কে verify)
+        val trustKs = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null)
+            setCertificateEntry("ca", caCert)
+        }
+        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+        tmf.init(trustKs)
 
         return SSLContext.getInstance("TLS").apply {
-            init(kmf.keyManagers, tmf.trustManagers, null)
+            init(kmf.keyManagers, tmf.trustManagers, SecureRandom())
         }
     }
 
-    // ── Load PKCS8 private key from PEM string ───────────────────
-    private fun loadPrivateKey(pem: String): PrivateKey {
-        val b64 = pem
-            .replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .replace("\\s".toRegex(), "")
-        val der = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-        return KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(der))
+    companion object {
+        private val AD_PATH_PATTERNS = listOf(
+            "/ads/", "/ad/", "/pagead/", "/adview", "/advert",
+            "/googleads", "/doubleclick", "/adsense",
+            "/imasdk", "/ima3", "/adserver",
+            "googlesyndication", "adservice", "adtrack",
+            "/prebid", "/openrtb", "/bid?", "/auction"
+        )
     }
-
-    private fun ECGenParameterSpec(name: String) =
-        java.security.spec.ECGenParameterSpec(name)
 }

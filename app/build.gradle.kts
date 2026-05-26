@@ -15,7 +15,6 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // ── NDK C++ engine ──────────────────────────────────────
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
@@ -27,7 +26,6 @@ android {
         }
     }
 
-    // ── CMake for C++ packet engine ─────────────────────────────
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -52,6 +50,17 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            excludes += listOf(
+                "META-INF/BCKEY.DSA",
+                "META-INF/BCKEY.SF",
+                "META-INF/BC2048KE.DSA",
+                "META-INF/BC2048KE.SF"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -65,4 +74,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // ── Bouncy Castle — proper CA cert signing ──
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }
