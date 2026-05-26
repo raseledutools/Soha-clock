@@ -57,7 +57,8 @@ android {
                 "META-INF/BCKEY.DSA",
                 "META-INF/BCKEY.SF",
                 "META-INF/BC2048KE.DSA",
-                "META-INF/BC2048KE.SF"
+                "META-INF/BC2048KE.SF",
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
             )
         }
     }
