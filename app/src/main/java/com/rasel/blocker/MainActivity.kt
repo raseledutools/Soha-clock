@@ -494,10 +494,10 @@ fun CustomStatusBar() {
     }
 
     val batteryIcon = when {
-        isCharging.value -> Icons.Filled.BatteryChargingFull
+        isCharging.value -> Icons.Filled.BatteryFull
         batteryLevel.intValue > 80 -> Icons.Filled.BatteryFull
-        batteryLevel.intValue > 40 -> Icons.Filled.Battery6Bar
-        else -> Icons.Filled.Battery2Bar
+        batteryLevel.intValue > 40 -> Icons.Filled.BatteryFull
+        else -> Icons.Filled.BatteryAlert
     }
     val batteryColor = if (batteryLevel.intValue <= 20) ComposeColor(0xFFFF4444) else ComposeColor.White
 
@@ -507,7 +507,7 @@ fun CustomStatusBar() {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(currentTime.value, color = ComposeColor.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            Icon(Icons.Filled.SignalCellularAlt, contentDescription = "Signal", tint = ComposeColor.White, modifier = Modifier.size(15.dp))
+            Icon(Icons.Filled.Smartphone, contentDescription = "Signal", tint = ComposeColor.White, modifier = Modifier.size(15.dp))
             Icon(Icons.Filled.Wifi, contentDescription = "WiFi", tint = ComposeColor.White, modifier = Modifier.size(15.dp))
         }
         Row(modifier = Modifier.padding(end = 40.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -554,7 +554,7 @@ fun SettingsScreen(
 
         // --- Rasel Edu Tools ---
         Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://raseledutools.github.io/"))) }, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF10B981))) {
-            Icon(Icons.Filled.Public, contentDescription = "Website", tint = ComposeColor.White, modifier = Modifier.size(20.dp))
+            Icon(Icons.Filled.Language, contentDescription = "Website", tint = ComposeColor.White, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text("Visit Rasel Edu Tools", fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
@@ -571,7 +571,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = ComposeColor(0xFF8B5CF6))
         ) {
-            Icon(Icons.Filled.ChatBubbleOutline, contentDescription = "Float AI", tint = ComposeColor.White, modifier = Modifier.size(20.dp))
+            Icon(Icons.Filled.Chat, contentDescription = "Float AI", tint = ComposeColor.White, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text("Start Floating AI Chat", fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
@@ -628,7 +628,7 @@ fun SettingsScreen(
             )
         ) {
             Icon(
-                if (adBlockRunning) Icons.Filled.GppBad else Icons.Filled.GppGood,
+                if (adBlockRunning) Icons.Filled.Block else Icons.Filled.Security,
                 contentDescription = null, tint = ComposeColor.White, modifier = Modifier.size(22.dp)
             )
             Spacer(Modifier.width(10.dp))

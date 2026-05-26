@@ -107,7 +107,6 @@ object FilterManager {
         }
         return false
     }
-}
 
     // ── Kotlin fallback methods (used if C++ engine not available) ──
 
@@ -140,3 +139,4 @@ object FilterManager {
         sum = sum.inv() and 0xFFFF
         pkt[10] = (sum shr 8).toByte(); pkt[11] = (sum and 0xFF).toByte()
     }
+}
